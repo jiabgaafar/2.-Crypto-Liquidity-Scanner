@@ -4,8 +4,8 @@ from datetime import datetime
 import requests
 
 
-BOT_TOKEN = os.getenv("8557681859:AAFKMBGxvtik8ge-Hsrw9wUeZw7f65J40aQ").strip()
-CHAT_ID = os.getenv("7624036216").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 session = requests.Session()
 
