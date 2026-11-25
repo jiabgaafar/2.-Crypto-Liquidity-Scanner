@@ -1,212 +1,244 @@
 import os
 from datetime import datetime
-
 import requests
-
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 session = requests.Session()
-
-
-def get_kraken_data(endpoint, params=None):
-    url = f"https://api.kraken.com/0/public/{endpoint}"
-
-    response = session.get(url, params=params, timeout=20)
-    response.raise_for_status()
-    data = response.json()
-
-    if data.get("error"):
-        raise RuntimeError("; ".join(data["error"]))
-
-    return data["result"]
+session.headers.update({"User-Agent": "CryptoWhalesRadar/2.0"})
 
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
+    url = f"https://telegram.org{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
     }
-
     try:
-        response = session.post(
-            url,
-            json=payload,
-            timeout=15,
-        )
-        response.raise_for_status()
+        response = session.post(url, json=payload, timeout=15)
         data = response.json()
-
         if not data.get("ok"):
-            print(
-                "فشل إرسال تيليجرام:",
-                data.get("description", "خطأ غير معروف"),
-            )
+            print("فشل إرسال تيليجرام:", data.get("description", "خطأ غير معروف"))
             return False
-
         return True
-
-    except requests.RequestException:
-        # لا نطبع الاستثناء حتى لا يظهر التوكن ضمن الرابط.
-        print("تعذّر إرسال رسالة تيليجرام؛ تحقق من الاتصال والإعدادات.")
-        return False
-
-    except ValueError:
-        print("استجابة تيليجرام ليست بصيغة JSON صالحة.")
+    except Exception:
+        print("تعذّر إرسال رسالة تيليجرام.")
         return False
 
 
-def scan_market():
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] جاري مسح السوق — شموع 5 دقائق...")
-
+def scan_kraken():
+    """رصد دخول وخروج السيولة الفورية من منصة Kraken (فريم 5 دقائق)"""
+    alerts = []
     try:
-        tickers = get_kraken_data("Ticker")
-    except Exception as error:
-        print(f"خطأ في جلب بيانات السوق: {error}")
-        return
+        res = session.get("https://kraken.com", timeout=15).json()
+        tickers = res.get("result", {})
+    except Exception as e:
+        print(f"خطأ في الاتصال بـ Kraken: {e}")
+        return alerts
 
-    excluded = [
-        "USDC",
-        "USDTZ",
-        "DAI",
-        "PYUSD",
-        "EUR",
-        "GBP",
-    ]
-
+    excluded = ["USDC", "USDTZ", "DAI", "PYUSD", "EUR", "GBP"]
     usd_pairs = []
 
     for pair, info in tickers.items():
-        if not pair.endswith(("USD", "USDT")):
+        if not pair.endswith(("USD", "USDT")) or any(s in pair for s in excluded):
             continue
-
-        if any(symbol in pair for symbol in excluded):
-            continue
-
         try:
-            estimated_volume = (
-                float(info["v"][1]) * float(info["c"][0])
-            )
-            usd_pairs.append((pair, estimated_volume))
+            vol_usd = float(info["v"][1]) * float(info["c"][0])
+            usd_pairs.append((pair, vol_usd))
+        except (KeyError, IndexError, ValueError):
+            continue
 
-        except (KeyError, IndexError, TypeError, ValueError):
-            print(f"تم تخطي {pair}: بيانات أسعار غير مكتملة.")
-
-    usd_pairs.sort(key=lambda item: item[1], reverse=True)
-    top_pairs = [pair for pair, _ in usd_pairs[:25]]
-
-    signals_found = 0
-    alerts_sent = 0
-    failed_pairs = 0
+    usd_pairs.sort(key=lambda x: x[1], reverse=True)
+    top_pairs = [p[0] for p in usd_pairs[:20]]
 
     for pair in top_pairs:
         try:
-            result = get_kraken_data(
-                "OHLC",
-                params={
-                    "pair": pair,
-                    "interval": 5,
-                },
-            )
+            ohlc_res = session.get(
+                "https://kraken.com",
+                params={"pair": pair, "interval": 5},
+                timeout=10,
+            ).json()
+            result = ohlc_res.get("result", {})
+            pair_key = next((k for k in result if k != "last"), None)
+            if not pair_key:
+                continue
 
-            pair_key = next(
-                key for key in result if key != "last"
-            )
             candles = result[pair_key]
-
             if len(candles) < 7:
                 continue
 
-            # آخر شمعة ما زالت مفتوحة؛ نفحص التي قبلها.
             current = candles[-2]
             previous = candles[-7:-2]
 
-            open_price = float(current[1])
-            close_price = float(current[4])
-
-            estimated_volume_5m = (
-                float(current[6]) * close_price
-            )
+            open_p = float(current[1])
+            close_p = float(current[4])
+            vol_5m = float(current[6]) * close_p
             trades_5m = int(current[7])
 
-            average_volume = sum(
-                float(candle[6]) * float(candle[4])
-                for candle in previous
-            ) / len(previous)
+            avg_vol = sum(float(c[6]) * float(c[4]) for c in previous) / len(previous)
+            avg_trades = sum(int(c[7]) for c in previous) / len(previous)
 
-            average_trades = sum(
-                int(candle[7])
-                for candle in previous
-            ) / len(previous)
-
-            if (
-                open_price <= 0
-                or average_volume <= 0
-                or average_trades <= 0
-            ):
+            if open_p <= 0 or avg_vol <= 0 or avg_trades <= 0:
                 continue
 
-            price_change = (
-                (close_price - open_price) / open_price
-            ) * 100
+            price_change = ((close_p - open_p) / open_p) * 100
+            vol_mult = vol_5m / avg_vol
+            trades_mult = trades_5m / avg_trades
 
-            matched = (
-                estimated_volume_5m >= average_volume * 2.0
-                and trades_5m >= average_trades * 1.8
-                and price_change >= 0.4
-            )
+            # شرط انفجار السيولة (مضاعف الحجم >= 2.2 وعدد الصفقات >= 1.8)
+            if vol_mult >= 2.2 and trades_mult >= 1.8:
+                if price_change >= 0.45:
+                    alerts.append(
+                        f"🟢 <b>دخول سيولة شرائية (Kraken)</b>\n"
+                        f"🪙 الزوج: <b>#{pair}</b>\n"
+                        f"💵 السعر: <code>${close_p}</code> (<b>+{price_change:.2f}%</b>)\n"
+                        f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
+                        f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
+                    )
+                elif price_change <= -0.45:
+                    alerts.append(
+                        f"🔴 <b>خروج سيولة وتصريف (Kraken)</b>\n"
+                        f"🪙 الزوج: <b>#{pair}</b>\n"
+                        f"💵 السعر: <code>${close_p}</code> (<b>{price_change:.2f}%</b>)\n"
+                        f"💸 السيولة الخارجة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
+                        f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
+                    )
+        except Exception:
+            continue
 
-            if not matched:
+    return alerts
+
+
+def scan_okx_oi():
+    """رصد تغيرات الفائدة المفتوحة (Open Interest - OI) من منصة OKX"""
+    alerts = []
+    # أشهر العملات ذات السيولة العالية في العقود الآجلة
+    symbols = [
+        "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP",
+        "XRP-USDT-SWAP", "DOGE-USDT-SWAP", "ADA-USDT-SWAP",
+        "AVAX-USDT-SWAP", "LINK-USDT-SWAP", "SUI-USDT-SWAP",
+        "PEPE-USDT-SWAP", "TON-USDT-SWAP", "NEAR-USDT-SWAP"
+    ]
+
+    for inst_id in symbols:
+        try:
+            # جلب بيانات الفائدة المفتوحة (فريم 5 دقائق)
+            oi_res = session.get(
+                "https://okx.com",
+                params={"ccy": inst_id.split("-")[0], "period": "5m"},
+                timeout=10,
+            ).json()
+
+            data_list = oi_res.get("data", [])
+            if len(data_list) < 2:
                 continue
 
-            signals_found += 1
+            # OKX ترتب البيانات من الأحدث للأقدم: data_list[0] هو الأحدث، data_list[1] قبله بـ 5 دقائق
+            new_oi = float(data_list[0][1])
+            old_oi = float(data_list[1][1])
 
-            quote_currency = (
-                "USDT" if pair.endswith("USDT") else "USD"
-            )
+            if old_oi <= 0:
+                continue
 
-            message = (
-                "<b>تنبيه ارتفاع حجم التداول — 5 دقائق</b>\n\n"
-                f"الزوج: <b>{pair}</b>\n"
-                f"السعر: <code>{close_price}</code> "
-                f"{quote_currency}\n"
-                f"تغير الشمعة: <b>+{price_change:.2f}%</b>\n"
-                f"حجم التداول التقديري: "
-                f"<b>{estimated_volume_5m:,.0f}</b> "
-                f"{quote_currency}\n"
-                f"مضاعف الحجم: "
-                f"<b>{estimated_volume_5m / average_volume:.1f}x</b>\n"
-                f"عدد الصفقات: <b>{trades_5m}</b>\n"
-                f"مضاعف عدد الصفقات: "
-                f"<b>{trades_5m / average_trades:.1f}x</b>\n\n"
-                "إشارة آلية وفق الشروط، وليست توصية شراء."
-            )
+            oi_change_pct = ((new_oi - old_oi) / old_oi) * 100
+            coin_name = inst_id.split("-")[0]
 
-            if send_telegram(message):
-                alerts_sent += 1
-                print(f"تم إرسال تنبيه للزوج {pair}")
+            # رصد دخول سيولة OI قوية (>= +1.5%)
+            if oi_change_pct >= 1.5:
+                alerts.append(
+                    f"🟢 <b>تدفق سيولة عقود (OI) — OKX</b>\n"
+                    f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
+                    f"📈 ارتفاع OI (5د): <b>+{oi_change_pct:.2f}%</b>\n"
+                    f"💰 إجمالي العقود المفتوحة: <b>${new_oi:,.0f}</b>"
+                )
+            # رصد خروج سيولة OI حاد (<= -1.5%)
+            elif oi_change_pct <= -1.5:
+                alerts.append(
+                    f"🔴 <b>خروج سيولة عقود (OI) — OKX</b>\n"
+                    f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
+                    f"📉 انخفاض OI (5د): <b>{oi_change_pct:.2f}%</b>\n"
+                    f"💰 المتبقي في العقود: <b>${new_oi:,.0f}</b>"
+                )
+        except Exception:
+            continue
 
-        except Exception as error:
-            failed_pairs += 1
-            print(f"تعذّر فحص {pair}: {error}")
+    return alerts
 
-    print(
-        f"انتهى الفحص: {signals_found} إشارة مطابقة، "
-        f"{alerts_sent} تنبيه مرسل، "
-        f"{failed_pairs} زوج تعذّر فحصه."
-    )
+
+def scan_coinbase():
+    """رصد طفرات السيولة الفورية من منصة Coinbase"""
+    alerts = []
+    pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "SUI-USD"]
+
+    for pair in pairs:
+        try:
+            res = session.get(
+                f"https://coinbase.com{pair}/candles",
+                params={"granularity": 300},  # 300 ثانية = 5 دقائق
+                timeout=10,
+            ).json()
+
+            if not isinstance(res, list) or len(res) < 7:
+                continue
+
+            # Coinbase ترتب من الأحدث للأقدم: res[1] آخر شمعة مغلقة
+            current = res[1]
+            previous = res[2:7]
+
+            open_p = float(current[3])
+            close_p = float(current[4])
+            vol_5m = float(current[5]) * close_p
+
+            avg_vol = sum(float(c[5]) * float(c[4]) for c in previous) / len(previous)
+            if open_p <= 0 or avg_vol <= 0:
+                continue
+
+            price_change = ((close_p - open_p) / open_p) * 100
+            vol_mult = vol_5m / avg_vol
+
+            if vol_mult >= 2.5:
+                if price_change >= 0.45:
+                    alerts.append(
+                        f"🟢 <b>دخول سيولة مؤسسية (Coinbase)</b>\n"
+                        f"🪙 الزوج: <b>#{pair.replace('-', '')}</b>\n"
+                        f"💵 السعر: <code>${close_p}</code> (<b>+{price_change:.2f}%</b>)\n"
+                        f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)"
+                    )
+                elif price_change <= -0.45:
+                    alerts.append(
+                        f"🔴 <b>خروج سيولة بيعية (Coinbase)</b>\n"
+                        f"🪙 الزوج: <b>#{pair.replace('-', '')}</b>\n"
+                        f"💵 السعر: <code>${close_p}</code> (<b>{price_change:.2f}%</b>)\n"
+                        f"💸 السيولة الخارجة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)"
+                    )
+        except Exception:
+            continue
+
+    return alerts
+
+
+def main():
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"[{now}] ⏳ جاري مسح السيولة (دخول/خروج) و OI من Kraken و OKX و Coinbase...")
+
+    all_alerts = []
+    all_alerts.extend(scan_kraken())
+    all_alerts.extend(scan_okx_oi())
+    all_alerts.extend(scan_coinbase())
+
+    sent_count = 0
+    for alert in all_alerts:
+        full_msg = f"{alert}\n\n⚠️ <i>رصد آلي لحركة السيولة — وليس توصية استثمارية.</i>"
+        if send_telegram(full_msg):
+            sent_count += 1
+
+    print(f"[{now}] ✅ اكتمل الفحص — الإشارات المكتشفة: {len(all_alerts)} | المرسلة: {sent_count}")
 
 
 if __name__ == "__main__":
     if not BOT_TOKEN or not CHAT_ID:
-        raise SystemExit(
-            "الإعدادات ناقصة: يجب توفير BOT_TOKEN وCHAT_ID "
-            "في متغيرات البيئة قبل التشغيل."
-        )
-
-    scan_market()
+        print("❌ خطأ: تأكد من إعداد BOT_TOKEN و CHAT_ID في Secrets.")
+    else:
+        main()
