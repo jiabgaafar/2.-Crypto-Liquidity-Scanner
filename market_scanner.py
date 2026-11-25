@@ -8,7 +8,7 @@ RAW_CHAT_IDS = os.getenv("CHAT_ID", "").strip()
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(",") if cid.strip()]
 
 session = requests.Session()
-session.headers.update({"User-Agent": "CryptoWhalesRadar/4.0"})
+session.headers.update({"User-Agent": "CryptoWhalesRadar/5.0"})
 
 
 def send_telegram(message):
@@ -27,8 +27,8 @@ def send_telegram(message):
                 success = True
             else:
                 print(f"فشل الإرسال إلى {chat_id}:", data.get("description", "خطأ غير معروف"))
-        except Exception:
-            print(f"تعذّر الاتصال بتيليجرام للإرسال إلى {chat_id}.")
+        except Exception as e:
+            print(f"خطأ اتصال بتيليجرام: {e}")
     return success
 
 
@@ -45,18 +45,18 @@ def check_okx_oi_single(coin_name):
 
         new_oi = float(data_list[0][1])
         old_oi = float(data_list[1][1])
-        if old_oi <= 0 or new_oi < 500000:
+        if old_oi <= 0 or new_oi < 300000:
             return None
 
         oi_change = ((new_oi - old_oi) / old_oi) * 100
-        if oi_change >= 1.6:
+        if oi_change >= 1.0:
             return (
                 f"🟢 <b>تدفق سيولة عقود (OI) — OKX</b>\n"
                 f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
                 f"📈 ارتفاع OI (5د): <b>+{oi_change:.2f}%</b>\n"
                 f"💰 العقود المفتوحة: <b>${new_oi:,.0f}</b>"
             )
-        elif oi_change <= -1.6:
+        elif oi_change <= -1.0:
             return (
                 f"🔴 <b>خروج سيولة عقود (OI) — OKX</b>\n"
                 f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
@@ -121,22 +121,22 @@ def check_kucoin_single(symbol):
         vol_5m = float(current[6])
 
         avg_vol = sum(float(c[6]) for c in previous) / len(previous)
-        if open_p <= 0 or avg_vol <= 0 or vol_5m < 15000:
+        if open_p <= 0 or avg_vol <= 0 or vol_5m < 10000:
             return None
 
         price_change = ((close_p - open_p) / open_p) * 100
         vol_mult = vol_5m / avg_vol
         clean_name = symbol.replace("-", "")
 
-        if vol_mult >= 2.5:
-            if price_change >= 0.5:
+        if vol_mult >= 2.0:
+            if price_change >= 0.35:
                 return (
                     f"🟢 <b>دخول سيولة شرائية — KuCoin</b>\n"
                     f"🪙 العملة: <b>#{clean_name}</b>\n"
                     f"💵 السعر: <code>${close_p}</code> (<b>+{price_change:.2f}%</b>)\n"
                     f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)"
                 )
-            elif price_change <= -0.5:
+            elif price_change <= -0.35:
                 return (
                     f"🔴 <b>خروج سيولة بيعية — KuCoin</b>\n"
                     f"🪙 العملة: <b>#{clean_name}</b>\n"
@@ -204,15 +204,15 @@ def check_kraken_single(pair):
         avg_vol = sum(float(c[6]) * float(c[4]) for c in previous) / len(previous)
         avg_trades = sum(int(c[7]) for c in previous) / len(previous)
 
-        if open_p <= 0 or avg_vol <= 0 or avg_trades <= 0 or vol_5m < 15000:
+        if open_p <= 0 or avg_vol <= 0 or avg_trades <= 0 or vol_5m < 10000:
             return None
 
         price_change = ((close_p - open_p) / open_p) * 100
         vol_mult = vol_5m / avg_vol
         trades_mult = trades_5m / avg_trades
 
-        if vol_mult >= 2.3 and trades_mult >= 1.8:
-            if price_change >= 0.45:
+        if vol_mult >= 2.0 and trades_mult >= 1.5:
+            if price_change >= 0.35:
                 return (
                     f"🟢 <b>دخول سيولة شرائية — Kraken</b>\n"
                     f"🪙 العملة: <b>#{pair}</b>\n"
@@ -220,7 +220,7 @@ def check_kraken_single(pair):
                     f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
                     f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
                 )
-            elif price_change <= -0.45:
+            elif price_change <= -0.35:
                 return (
                     f"🔴 <b>خروج سيولة وتصريف — Kraken</b>\n"
                     f"🪙 العملة: <b>#{pair}</b>\n"
@@ -265,7 +265,7 @@ def scan_all_kraken():
 
 def main():
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] 🚀 بدء المسح الشامل لجميع عملات OKX و KuCoin و Kraken...")
+    print(f"[{now}] 🚀 بدء المسح الشامل المصحح لجميع عملات OKX و KuCoin و Kraken...")
 
     all_alerts = []
     all_alerts.extend(scan_all_okx())
