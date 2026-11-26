@@ -11,12 +11,11 @@ EVENT_NAME = os.getenv("GITHUB_EVENT_NAME", "")
 session = requests.Session()
 session.headers.update({"User-Agent": "Mozilla/5.0 CryptoScanner/2.0"})
 
-P = "https" + "://"
-TG_BASE = P + "api.telegram.org/bot"
-OKX_BASE = P + "://okx.com"
-KUCOIN_BASE = P + "://kucoin.com"
-BYBIT_BASE = P + "://bybit.com"
-BINANCE_BASE = P + "data-api.binance.vision/api/v3"
+TG_BASE      = "https://api.telegram.org/bot"
+OKX_BASE     = "https://www.okx.com"
+KUCOIN_BASE  = "https://api.kucoin.com"
+BYBIT_BASE   = "https://api.bybit.com"
+BINANCE_BASE = "https://data-api.binance.vision/api/v3"
 
 
 def send_telegram(message):
@@ -41,10 +40,11 @@ def send_telegram(message):
     return success
 
 
+# ═══════════════════════════ OKX ═══════════════════════════
 def check_okx_oi_single(coin_name):
     try:
         oi_res = session.get(
-            f"{OKX_BASE}/rubik/stat/contracts/open-interest-volume",
+            f"{OKX_BASE}/api/v5/rubik/stat/contracts/open-interest-volume",
             params={"ccy": coin_name, "period": "5m"},
             timeout=8,
         ).json()
@@ -52,8 +52,9 @@ def check_okx_oi_single(coin_name):
         if len(data_list) < 2:
             return None
 
-        new_oi = float(data_list)
-        old_oi = float(data_list)
+        # OKX يعيد: [[ts, oi_usd, vol_usd], ...] — الأحدث أولاً
+        new_oi = float(data_list[0][1])
+        old_oi = float(data_list[1][1])
         if old_oi <= 0 or new_oi < 300000:
             return None
 
@@ -72,7 +73,7 @@ def check_okx_oi_single(coin_name):
                 f"📉 انخفاض OI (5د): <b>{oi_change:.2f}%</b>\n"
                 f"💰 المتبقي في العقود: <b>${new_oi:,.0f}</b>"
             )
-    except Exception:
+    except Exception as e:
         pass
     return None
 
@@ -80,7 +81,11 @@ def check_okx_oi_single(coin_name):
 def scan_all_okx():
     alerts = []
     try:
-        res = session.get(f"{OKX_BASE}/market/tickers", params={"instType": "SWAP"}, timeout=12).json()
+        res = session.get(
+            f"{OKX_BASE}/api/v5/market/tickers",
+            params={"instType": "SWAP"},
+            timeout=12,
+        ).json()
         swaps = res.get("data", [])
     except Exception as e:
         print(f"خطأ في OKX: {e}")
@@ -93,11 +98,11 @@ def scan_all_okx():
             try:
                 vol_24h = float(item.get("volCcy24h", 0)) * float(item.get("last", 0))
                 if vol_24h >= 500000:
-                    coins.append(inst_id.split("-"))
-            except ValueError:
+                    coins.append(inst_id.split("-")[0])   # ✅ str بدل list
+            except (ValueError, TypeError):
                 continue
 
-    coins = list(dict.fromkeys(coins))
+    coins = list(dict.fromkeys(coins))   # ✅ الآن قابلة للـ hashing
     print(f"🔍 فحص {len(coins)} عملة في OKX...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         for res in as_completed([executor.submit(check_okx_oi_single, c) for c in coins]):
@@ -106,10 +111,11 @@ def scan_all_okx():
     return alerts
 
 
+# ═══════════════════════════ KuCoin ═══════════════════════════
 def check_kucoin_single(symbol):
     try:
         res = session.get(
-            f"{KUCOIN_BASE}/market/candles",
+            f"{KUCOIN_BASE}/api/v1/market/candles",
             params={"type": "5min", "symbol": symbol},
             timeout=8,
         ).json()
@@ -117,13 +123,14 @@ def check_kucoin_single(symbol):
         if not isinstance(candles, list) or len(candles) < 7:
             return None
 
-        current = candles
-        previous = candles[2:7]
-        open_p = float(current)
-        close_p = float(current)
-        vol_5m = float(current)
+        # KuCoin يعيد: [[ts, open, close, high, low, volume, turnover], ...] — الأحدث أولاً
+        current  = candles[0]
+        previous = candles[1:7]
+        open_p  = float(current[1])
+        close_p = float(current[2])
+        vol_5m  = float(current[5])
 
-        avg_vol = sum(float(c) for c in previous) / len(previous)
+        avg_vol = sum(float(c[5]) for c in previous) / len(previous)
         if open_p <= 0 or avg_vol <= 0 or vol_5m < 10000:
             return None
 
@@ -154,7 +161,7 @@ def check_kucoin_single(symbol):
 def scan_all_kucoin():
     alerts = []
     try:
-        res = session.get(f"{KUCOIN_BASE}/market/allTickers", timeout=12).json()
+        res = session.get(f"{KUCOIN_BASE}/api/v1/market/allTickers", timeout=12).json()
         tickers = res.get("data", {}).get("ticker", [])
     except Exception as e:
         print(f"خطأ في KuCoin: {e}")
@@ -167,7 +174,7 @@ def scan_all_kucoin():
             try:
                 if float(item.get("volValue", 0)) >= 300000:
                     symbols.append(sym)
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
     print(f"🔍 فحص {len(symbols)} عملة في KuCoin...")
@@ -176,19 +183,24 @@ def scan_all_kucoin():
             if res.result():
                 alerts.append(res.result())
     return alerts
+
+
+# ═══════════════════════════ Bybit ═══════════════════════════
 def check_bybit_single(symbol):
     try:
         res = session.get(
-            f"{BYBIT_BASE}/market/open-interest",
-            params={"category": "linear", "symbol": symbol, "intervalTime": "5min", "limit": 2},
+            f"{BYBIT_BASE}/v5/market/open-interest",
+            params={"category": "linear", "symbol": symbol,
+                    "intervalTime": "5min", "limit": 2},
             timeout=8,
         ).json()
         data_list = res.get("result", {}).get("list", [])
         if len(data_list) < 2:
             return None
 
-        new_oi = float(data_list["openInterest"])
-        old_oi = float(data_list["openInterest"])
+        # Bybit يعيد الأحدث أولاً
+        new_oi = float(data_list[0]["openInterest"])
+        old_oi = float(data_list[1]["openInterest"])
         if old_oi <= 0:
             return None
 
@@ -213,7 +225,11 @@ def check_bybit_single(symbol):
 def scan_all_bybit():
     alerts = []
     try:
-        res = session.get(f"{BYBIT_BASE}/market/tickers", params={"category": "linear"}, timeout=12).json()
+        res = session.get(
+            f"{BYBIT_BASE}/v5/market/tickers",
+            params={"category": "linear"},
+            timeout=12,
+        ).json()
         tickers = res.get("result", {}).get("list", [])
     except Exception as e:
         print(f"خطأ في Bybit: {e}")
@@ -226,7 +242,7 @@ def scan_all_bybit():
             try:
                 if float(item.get("turnover24h", 0)) >= 1000000:
                     symbols.append(sym)
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
     print(f"🔍 فحص {len(symbols)} عملة في Bybit...")
@@ -237,6 +253,7 @@ def scan_all_bybit():
     return alerts
 
 
+# ═══════════════════════════ Binance ═══════════════════════════
 def check_binance_single(symbol):
     try:
         res = session.get(
@@ -247,13 +264,14 @@ def check_binance_single(symbol):
         if not isinstance(res, list) or len(res) < 7:
             return None
 
-        current = res[-2]
+        # Binance: الأقدم أولاً؛ آخر شمعة مفتوحة = res[-1] → نستخدم res[-2] (المغلقة)
+        current  = res[-2]
         previous = res[:-2]
-        open_p = float(current)
-        close_p = float(current)
-        vol_5m = float(current)
+        open_p  = float(current[1])
+        close_p = float(current[4])
+        vol_5m  = float(current[5])
 
-        avg_vol = sum(float(c) for c in previous) / len(previous)
+        avg_vol = sum(float(c[5]) for c in previous) / len(previous)
         if open_p <= 0 or avg_vol <= 0 or vol_5m < 50000:
             return None
 
@@ -297,7 +315,7 @@ def scan_all_binance():
             try:
                 if float(item.get("quoteVolume", 0)) >= 2000000:
                     symbols.append(sym)
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
     print(f"🔍 فحص {len(symbols)} عملة في Binance...")
@@ -308,6 +326,7 @@ def scan_all_binance():
     return alerts
 
 
+# ═══════════════════════════ Main ═══════════════════════════
 def main():
     print("🚀 بدء فحص السيولة الشامل في 4 منصات...")
     all_alerts = (
@@ -321,7 +340,7 @@ def main():
         print(f"📊 تم العثور على {len(all_alerts)} تنبيه سيولة.")
         now_str = datetime.utcnow().strftime("%H:%M UTC")
         header = f"📡 <b>رادار السيولة اللحظي (4 منصات)</b> ({now_str})\n" + ("—" * 18) + "\n\n"
-        
+
         chunk = header
         for alert in all_alerts:
             if len(chunk) + len(alert) + 4 > 3800:
@@ -334,9 +353,12 @@ def main():
     else:
         print("ℹ️ لا توجد تحركات سيولة قوية مطابقة للشروط حالياً.")
         if EVENT_NAME == "workflow_dispatch":
-            send_telegram("✅ <b>اختبار الرادار الشامل (4 منصات) ناجح!</b>\nتم فحص OKX و KuCoin و Bybit و Binance بنجاح، ولا توجد تحركات سيولة غير طبيعية حالياً.")
+            send_telegram(
+                "✅ <b>اختبار الرادار الشامل (4 منصات) ناجح!</b>\n"
+                "تم فحص OKX و KuCoin و Bybit و Binance بنجاح، "
+                "ولا توجد تحركات سيولة غير طبيعية حالياً."
+            )
 
 
 if __name__ == "__main__":
     main()
-                    
