@@ -6,9 +6,10 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 RAW_CHAT_IDS = os.getenv("CHAT_ID", "").strip()
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(",") if cid.strip()]
+EVENT_NAME = os.getenv("GITHUB_EVENT_NAME", "")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "CryptoWhalesRadar/5.0"})
+session.headers.update({"User-Agent": "CryptoWhalesRadar/7.2"})
 
 
 def send_telegram(message):
@@ -49,14 +50,14 @@ def check_okx_oi_single(coin_name):
             return None
 
         oi_change = ((new_oi - old_oi) / old_oi) * 100
-        if oi_change >= 1.0:
+        if oi_change >= 0.8:
             return (
                 f"🟢 <b>تدفق سيولة عقود (OI) — OKX</b>\n"
                 f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
                 f"📈 ارتفاع OI (5د): <b>+{oi_change:.2f}%</b>\n"
                 f"💰 العقود المفتوحة: <b>${new_oi:,.0f}</b>"
             )
-        elif oi_change <= -1.0:
+        elif oi_change <= -0.8:
             return (
                 f"🔴 <b>خروج سيولة عقود (OI) — OKX</b>\n"
                 f"🪙 العملة: <b>#{coin_name}USDT</b>\n"
@@ -128,15 +129,15 @@ def check_kucoin_single(symbol):
         vol_mult = vol_5m / avg_vol
         clean_name = symbol.replace("-", "")
 
-        if vol_mult >= 2.0:
-            if price_change >= 0.35:
+        if vol_mult >= 1.8:
+            if price_change >= 0.30:
                 return (
                     f"🟢 <b>دخول سيولة شرائية — KuCoin</b>\n"
                     f"🪙 العملة: <b>#{clean_name}</b>\n"
                     f"💵 السعر: <code>${close_p}</code> (<b>+{price_change:.2f}%</b>)\n"
                     f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)"
                 )
-            elif price_change <= -0.35:
+            elif price_change <= -0.30:
                 return (
                     f"🔴 <b>خروج سيولة بيعية — KuCoin</b>\n"
                     f"🪙 العملة: <b>#{clean_name}</b>\n"
@@ -211,8 +212,8 @@ def check_kraken_single(pair):
         vol_mult = vol_5m / avg_vol
         trades_mult = trades_5m / avg_trades
 
-        if vol_mult >= 2.0 and trades_mult >= 1.5:
-            if price_change >= 0.35:
+        if vol_mult >= 1.8 and trades_mult >= 1.4:
+            if price_change >= 0.30:
                 return (
                     f"🟢 <b>دخول سيولة شرائية — Kraken</b>\n"
                     f"🪙 العملة: <b>#{pair}</b>\n"
@@ -220,7 +221,7 @@ def check_kraken_single(pair):
                     f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
                     f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
                 )
-            elif price_change <= -0.35:
+            elif price_change <= -0.30:
                 return (
                     f"🔴 <b>خروج سيولة وتصريف — Kraken</b>\n"
                     f"🪙 العملة: <b>#{pair}</b>\n"
@@ -265,7 +266,7 @@ def scan_all_kraken():
 
 def main():
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] 🚀 بدء المسح الشامل المصحح لجميع عملات OKX و KuCoin و Kraken...")
+    print(f"[{now}] 🚀 بدء المسح الشامل المصحح (v7.2) لجميع عملات OKX و KuCoin و Kraken...")
 
     all_alerts = []
     all_alerts.extend(scan_all_okx())
@@ -278,11 +279,14 @@ def main():
         if send_telegram(full_msg):
             sent_count += 1
 
-    print(f"[{now}] ✅ اكتمل المسح الشامل — الإشارات المكتشفة: {len(all_alerts)} | المرسلة: {sent_count}")
+    if EVENT_NAME == "workflow_dispatch":
+        send_telegram(
+            f"✅ <b>تقرير الفحص المباشر (v7.2)</b>\n"
+            f"🕒 الوقت: <code>{now}</code>\n"
+            f"📊 الإشارات المكتشفة: <b>{len(all_alerts)}</b>\n"
+            f"📨 الرسائل المرسلة: <b>{sent_count}</b>"
+        )
+
+    print(f"[{now}] ✅ اكتمل المسح — الإشارات المكتشفة: {len(all_alerts)} | المرسلة: {sent_count}")
 
 
-if __name__ == "__main__":
-    if not BOT_TOKEN or not CHAT_IDS:
-        print("❌ خطأ: تأكد من إعداد BOT_TOKEN و CHAT_ID في Secrets.")
-    else:
-        main()
