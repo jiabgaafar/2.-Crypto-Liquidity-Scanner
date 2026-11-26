@@ -9,7 +9,11 @@ CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(",") if cid.strip()]
 EVENT_NAME = os.getenv("GITHUB_EVENT_NAME", "")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "CryptoWhalesRadar/7.2"})
+session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CryptoScanner/1.0"})
+
+TG_BASE = "https://" + "api.telegram.org" + "/bot"
+OKX_BASE = "https://" + "://okx.com" + "/api/v5"
+KUCOIN_BASE = "https://" + "://kucoin.com" + "/api/v1"
 
 
 def send_telegram(message):
@@ -17,7 +21,7 @@ def send_telegram(message):
         print("⚠️ تنبيه: لم يتم العثور على BOT_TOKEN أو CHAT_ID في الإعدادات.")
         return False
 
-    url = f"https://telegram.org{BOT_TOKEN}/sendMessage"
+    url = f"{TG_BASE}{BOT_TOKEN}/sendMessage"
     success = False
     for chat_id in CHAT_IDS:
         payload = {
@@ -41,7 +45,7 @@ def send_telegram(message):
 def check_okx_oi_single(coin_name):
     try:
         oi_res = session.get(
-            "https://okx.com",
+            f"{OKX_BASE}/rubik/stat/contracts/open-interest-volume",
             params={"ccy": coin_name, "period": "5m"},
             timeout=8,
         ).json()
@@ -78,7 +82,7 @@ def scan_all_okx():
     alerts = []
     try:
         res = session.get(
-            "https://okx.com",
+            f"{OKX_BASE}/market/tickers",
             params={"instType": "SWAP"},
             timeout=12,
         ).json()
@@ -99,6 +103,7 @@ def scan_all_okx():
                 continue
 
     coins = list(dict.fromkeys(coins))
+    print(f"🔍 جاري فحص {len(coins)} عملة في OKX...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = [executor.submit(check_okx_oi_single, coin) for coin in coins]
         for future in as_completed(futures):
@@ -111,7 +116,7 @@ def scan_all_okx():
 def check_kucoin_single(symbol):
     try:
         res = session.get(
-            "https://kucoin.com",
+            f"{KUCOIN_BASE}/market/candles",
             params={"type": "5min", "symbol": symbol},
             timeout=8,
         ).json()
@@ -157,7 +162,7 @@ def check_kucoin_single(symbol):
 def scan_all_kucoin():
     alerts = []
     try:
-        res = session.get("https://kucoin.com", timeout=12).json()
+        res = session.get(f"{KUCOIN_BASE}/market/allTickers", timeout=12).json()
         tickers = res.get("data", {}).get("ticker", [])
     except Exception as e:
         print(f"خطأ في الاتصال بمنصة KuCoin: {e}")
@@ -174,6 +179,7 @@ def scan_all_kucoin():
             except ValueError:
                 continue
 
+    print(f"🔍 جاري فحص {len(symbols)} عملة في KuCoin...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = [executor.submit(check_kucoin_single, sym) for sym in symbols]
         for future in as_completed(futures):
@@ -211,3 +217,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
