@@ -13,6 +13,10 @@ session.headers.update({"User-Agent": "CryptoWhalesRadar/7.2"})
 
 
 def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_IDS:
+        print("⚠️ تنبيه: لم يتم العثور على BOT_TOKEN أو CHAT_ID في الإعدادات.")
+        return False
+
     url = f"https://telegram.org{BOT_TOKEN}/sendMessage"
     success = False
     for chat_id in CHAT_IDS:
@@ -25,11 +29,12 @@ def send_telegram(message):
             response = session.post(url, json=payload, timeout=15)
             data = response.json()
             if data.get("ok"):
+                print(f"✅ تم إرسال الرسالة بنجاح إلى: {chat_id}")
                 success = True
             else:
-                print(f"فشل الإرسال إلى {chat_id}:", data.get("description", "خطأ غير معروف"))
+                print(f"❌ فشل الإرسال إلى {chat_id}: {data.get('description', 'خطأ غير معروف')}")
         except Exception as e:
-            print(f"خطأ اتصال بتيليجرام: {e}")
+            print(f"❌ خطأ اتصال بتيليجرام: {e}")
     return success
 
 
@@ -79,7 +84,7 @@ def scan_all_okx():
         ).json()
         swaps = res.get("data", [])
     except Exception as e:
-        print(f"خطأ في OKX: {e}")
+        print(f"خطأ في الاتصال بمنصة OKX: {e}")
         return alerts
 
     coins = []
@@ -155,16 +160,16 @@ def scan_all_kucoin():
         res = session.get("https://kucoin.com", timeout=12).json()
         tickers = res.get("data", {}).get("ticker", [])
     except Exception as e:
-        print(f"خطأ في KuCoin: {e}")
+        print(f"خطأ في الاتصال بمنصة KuCoin: {e}")
         return alerts
 
     symbols = []
-    for t in tickers:
-        sym = t.get("symbol", "")
-        if sym.endswith("-USDT") and not any(x in sym for x in ["USDC", "DAI", "TUSD", "3L", "3S", "UP", "DOWN"]):
+    for item in tickers:
+        sym = item.get("symbol", "")
+        if sym.endswith("-USDT"):
             try:
-                vol_val = float(t.get("volValue", 0))
-                if vol_val >= 100000:
+                vol_val = float(item.get("volValue", 0))
+                if vol_val >= 300000:
                     symbols.append(sym)
             except ValueError:
                 continue
@@ -178,115 +183,31 @@ def scan_all_kucoin():
     return alerts
 
 
-def check_kraken_single(pair):
-    try:
-        res = session.get(
-            "https://kraken.com",
-            params={"pair": pair, "interval": 5},
-            timeout=8,
-        ).json()
-        result = res.get("result", {})
-        pair_key = next((k for k in result if k != "last"), None)
-        if not pair_key:
-            return None
-
-        candles = result[pair_key]
-        if len(candles) < 7:
-            return None
-
-        current = candles[-2]
-        previous = candles[-7:-2]
-
-        open_p = float(current[1])
-        close_p = float(current[4])
-        vol_5m = float(current[6]) * close_p
-        trades_5m = int(current[7])
-
-        avg_vol = sum(float(c[6]) * float(c[4]) for c in previous) / len(previous)
-        avg_trades = sum(int(c[7]) for c in previous) / len(previous)
-
-        if open_p <= 0 or avg_vol <= 0 or avg_trades <= 0 or vol_5m < 10000:
-            return None
-
-        price_change = ((close_p - open_p) / open_p) * 100
-        vol_mult = vol_5m / avg_vol
-        trades_mult = trades_5m / avg_trades
-
-        if vol_mult >= 1.8 and trades_mult >= 1.4:
-            if price_change >= 0.30:
-                return (
-                    f"🟢 <b>دخول سيولة شرائية — Kraken</b>\n"
-                    f"🪙 العملة: <b>#{pair}</b>\n"
-                    f"💵 السعر: <code>${close_p}</code> (<b>+{price_change:.2f}%</b>)\n"
-                    f"🔥 السيولة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
-                    f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
-                )
-            elif price_change <= -0.30:
-                return (
-                    f"🔴 <b>خروج سيولة وتصريف — Kraken</b>\n"
-                    f"🪙 العملة: <b>#{pair}</b>\n"
-                    f"💵 السعر: <code>${close_p}</code> (<b>{price_change:.2f}%</b>)\n"
-                    f"💸 السيولة الخارجة (5د): <b>${vol_5m:,.0f}</b> (<b>{vol_mult:.1f}x</b>)\n"
-                    f"👥 الصفقات: <b>{trades_5m}</b> ({trades_mult:.1f}x)"
-                )
-    except Exception:
-        pass
-    return None
-
-
-def scan_all_kraken():
-    alerts = []
-    try:
-        res = session.get("https://kraken.com", timeout=12).json()
-        tickers = res.get("result", {})
-    except Exception as e:
-        print(f"خطأ في Kraken: {e}")
-        return alerts
-
-    excluded = ["USDC", "USDTZ", "DAI", "PYUSD", "EUR", "GBP", "AUD", "CAD", "JPY", "CHF"]
-    pairs = []
-    for pair, info in tickers.items():
-        if not pair.endswith(("USD", "USDT")) or any(s in pair for s in excluded):
-            continue
-        try:
-            vol_usd = float(info["v"][1]) * float(info["c"][0])
-            if vol_usd >= 50000:
-                pairs.append(pair)
-        except (KeyError, IndexError, ValueError):
-            continue
-
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = [executor.submit(check_kraken_single, pair) for pair in pairs]
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                alerts.append(res)
-    return alerts
-
-
 def main():
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] 🚀 بدء المسح الشامل المصحح (v7.2) لجميع عملات OKX و KuCoin و Kraken...")
+    print("🚀 بدء فحص السيولة في OKX و KuCoin...")
+    okx_alerts = scan_all_okx()
+    kucoin_alerts = scan_all_kucoin()
+    all_alerts = okx_alerts + kucoin_alerts
 
-    all_alerts = []
-    all_alerts.extend(scan_all_okx())
-    all_alerts.extend(scan_all_kucoin())
-    all_alerts.extend(scan_all_kraken())
-
-    sent_count = 0
-    for alert in all_alerts[:12]:
-        full_msg = f"{alert}\n\n⚠️ <i>رصد آلي لحركة السيولة — وليس توصية استثمارية.</i>"
-        if send_telegram(full_msg):
-            sent_count += 1
-
-    if EVENT_NAME == "workflow_dispatch":
-        send_telegram(
-            f"✅ <b>تقرير الفحص المباشر (v7.2)</b>\n"
-            f"🕒 الوقت: <code>{now}</code>\n"
-            f"📊 الإشارات المكتشفة: <b>{len(all_alerts)}</b>\n"
-            f"📨 الرسائل المرسلة: <b>{sent_count}</b>"
-        )
-
-    print(f"[{now}] ✅ اكتمل المسح — الإشارات المكتشفة: {len(all_alerts)} | المرسلة: {sent_count}")
+    if all_alerts:
+        print(f"📊 تم العثور على {len(all_alerts)} تنبيه سيولة.")
+        now_str = datetime.utcnow().strftime("%H:%M UTC")
+        header = f"📡 <b>رادار السيولة اللحظي</b> ({now_str})\n" + ("—" * 18) + "\n\n"
+        
+        chunk = header
+        for alert in all_alerts:
+            if len(chunk) + len(alert) + 4 > 3800:
+                send_telegram(chunk)
+                chunk = header + alert + "\n\n"
+            else:
+                chunk += alert + "\n\n"
+        if chunk.strip():
+            send_telegram(chunk)
+    else:
+        print("ℹ️ لا توجد تحركات سيولة قوية مطابقة للشروط حالياً.")
+        if EVENT_NAME == "workflow_dispatch":
+            send_telegram("✅ <b>اختبار التشغيل اليدوي ناجح!</b>\nالبوت متصل ويعمل بنجاح، ولا توجد تحركات سيولة غير طبيعية في هذه اللحظة.")
 
 
+if __name__ == "__main__":
+    main()
