@@ -38,9 +38,12 @@ def send_telegram(message):
         try:
             response = session.post(url, json=payload, timeout=15)
             if response.json().get("ok"):
+                print(f"✅ تم إرسال النص إلى: {chat_id}")
                 success = True
-        except Exception:
-            pass
+            else:
+                print(f"❌ فشل إرسال النص إلى {chat_id}: {response.json().get('description')}")
+        except Exception as e:
+            print(f"❌ خطأ اتصال بالتيليجرام (نص): {e}")
     return success
 
 # --- توليد الشارت ---
@@ -77,16 +80,23 @@ def generate_chart_image(symbol):
         print(f"فشل توليد الشارت لـ {symbol}: {e}")
         return None
 
-# --- إرسال الصور ---
+# --- إرسال الصور (مع إصلاح المؤشر للقناة العامة) ---
 def send_telegram_photo(photo_buf, caption, chat_id):
+    photo_buf.seek(0) # 🔴 إعادة المؤشر لبداية الصورة لكل جهة إرسال
     url = f"{TG_BASE}{BOT_TOKEN}/sendPhoto"
     files = {'photo': ('chart.png', photo_buf, 'image/png')}
     data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
     try:
         response = session.post(url, data=data, files=files, timeout=15)
-        return response.json().get("ok")
-    except Exception:
-        return False
+        res_json = response.json()
+        if res_json.get("ok"):
+            print(f"✅ تم إرسال الصورة بنجاح إلى: {chat_id}")
+            return True
+        else:
+            print(f"❌ فشل إرسال الصورة إلى {chat_id}: {res_json.get('description')}")
+    except Exception as e:
+        print(f"❌ خطأ اتصال عند إرسال الصورة إلى {chat_id}: {e}")
+    return False
 
 # ================== OKX ==================
 def check_okx_oi_single(coin_name):
@@ -192,10 +202,18 @@ def scan_all_kucoin():
             if res.result(): alerts.append(res.result())
     return alerts
 
-# ================== Bybit ==================
+# ================== Bybit (محصن ضد الحظر) ==================
 def check_bybit_single(symbol):
     try:
-        res = session.get(f"{BYBIT_BASE}/v5/market/open-interest", params={"category": "linear", "symbol": symbol, "intervalTime": "5min", "limit": 2}, timeout=8).json()
+        response = session.get(
+            f"{BYBIT_BASE}/v5/market/open-interest", 
+            params={"category": "linear", "symbol": symbol, "intervalTime": "5min", "limit": 2}, 
+            timeout=8
+        )
+        if response.status_code != 200:
+            return None 
+            
+        res = response.json()
         data_list = res.get("result", {}).get("list", [])
         if len(data_list) < 2: return None
 
@@ -215,7 +233,12 @@ def check_bybit_single(symbol):
 def scan_all_bybit():
     alerts = []
     try:
-        res = session.get(f"{BYBIT_BASE}/v5/market/tickers", params={"category": "linear"}, timeout=12).json()
+        response = session.get(f"{BYBIT_BASE}/v5/market/tickers", params={"category": "linear"}, timeout=12)
+        if response.status_code != 200:
+            print("⚠️ منصة Bybit رفضت الاتصال مؤقتاً.")
+            return alerts
+            
+        res = response.json()
         tickers = res.get("result", {}).get("list", [])
     except Exception as e:
         print(f"خطأ في Bybit: {e}")
@@ -231,7 +254,7 @@ def scan_all_bybit():
                 continue
 
     print(f"🔍 فحص {len(symbols)} عملة في Bybit...")
-    with ThreadPoolExecutor(max_workers=15) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor: # خفضناها لـ 5 لتجنب الحظر
         for res in as_completed([executor.submit(check_bybit_single, s) for s in symbols]):
             if res.result(): alerts.append(res.result())
     return alerts
@@ -242,7 +265,7 @@ def check_binance_single(symbol):
         res = session.get(f"{BINANCE_BASE}/klines", params={"symbol": symbol, "interval": "5m", "limit": 7}, timeout=8).json()
         if not isinstance(res, list) or len(res) < 7: return None
 
-        current = res[-2]
+        current = res[-2] # الشمعة المغلقة الأخيرة
         previous = res[:-2]
         open_p = float(current[1])
         close_p = float(current[4])
