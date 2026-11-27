@@ -2,7 +2,7 @@ name: Crypto Liquidity Scanner
 
 on:
   schedule:
-    - cron: '*/5 * * * *' # يعمل كل 5 دقائق
+    - cron: '*/15 * * * *' # يعمل كل 15 دقائق
   workflow_dispatch:      # يسمح لك بتشغيله يدوياً للتجربة
 
 jobs:
