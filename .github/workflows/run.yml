@@ -2,18 +2,22 @@ name: Crypto Liquidity Scanner
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # يعمل كل 15 دقائق
-  workflow_dispatch:      # يسمح لك بتشغيله يدوياً للتجربة
+    - cron: '*/10 * * * *' # يعمل كل 10 دقيقة
+  workflow_dispatch:       # يسمح بالتشغيل اليدوي
+
+# 🔴 مهم جداً: للسماح للبوت بحفظ الذاكرة في المستودع
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4 # ✅ تم إصلاح الإصدار
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5 # ✅ تم إصلاح الإصدار
         with:
           python-version: '3.10'
 
@@ -25,3 +29,12 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python market_scanner.py
+
+      # 🔴 هذه الخطوة تحفظ الذاكرة لمنع التكرار
+      - name: Commit and Push Cache
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add alert_cache.json
+          git commit -m "Update alert cache [skip ci]" || echo "No changes to commit"
+          git push
