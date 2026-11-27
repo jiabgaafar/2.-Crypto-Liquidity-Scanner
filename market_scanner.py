@@ -1,5 +1,6 @@
 import os
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import pandas as pd
@@ -20,9 +21,23 @@ KUCOIN_BASE  = "https://api.kucoin.com"
 BYBIT_BASE   = "https://api.bybit.com"
 BINANCE_BASE = "https://data-api.binance.vision/api/v3"
 
-# الحد الأدنى للسيولة (2.5% من حجم اليوم في 5 دقائق)
-ANOMALY_THRESHOLD = 2.5 
+# ⚙️ الإعدادات
+ANOMALY_THRESHOLD = 1.5     # نسبة الشذوذ (2.5% من حجم اليوم)
+COOLDOWN_MINUTES = 60       # مدة الانتظار قبل إرسال تنبيه لنفس العملة مرة أخرى
+CACHE_FILE = "alert_cache.json"
 
+# --- دوال الذاكرة (Cache) ---
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as f: json.dump(cache, f)
+
+# --- دوال مساعدة ---
 def format_price(price):
     if price >= 1: return f"{price:,.3f}"
     elif price >= 0.01: return f"{price:.5f}"
@@ -33,17 +48,15 @@ def send_telegram(message):
     if not BOT_TOKEN or not CHAT_IDS: return False
     url = f"{TG_BASE}{BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_IDS:
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-        try: session.post(url, json=payload, timeout=15)
+        try: session.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=15)
         except Exception: pass
 
 def send_telegram_photo(photo_buf, caption, chat_id):
     photo_buf.seek(0)
     url = f"{TG_BASE}{BOT_TOKEN}/sendPhoto"
     files = {'photo': ('chart.png', photo_buf, 'image/png')}
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
     try:
-        if session.post(url, data=data, files=files, timeout=15).json().get("ok"):
+        if session.post(url, data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}, files=files, timeout=15).json().get("ok"):
             print(f"✅ تم إرسال الصورة إلى: {chat_id}")
     except Exception: pass
 
@@ -94,32 +107,22 @@ def generate_chart_image(exchange, symbol):
         mpf.plot(df, type='candle', style=s, volume=True, savefig=dict(fname=buf, format='png', dpi=100, bbox_inches='tight'))
         buf.seek(0)
         return buf
-    except Exception:
-        return None
+    except Exception: return None
 
 # ================== Binance ==================
 def check_binance_single(symbol, vol_24h):
     try:
         res = session.get(f"{BINANCE_BASE}/klines", params={"symbol": symbol, "interval": "5m", "limit": 2}, timeout=8).json()
         if not isinstance(res, list) or len(res) < 2: return None
-
-        current = res[0] # آخر شمعة مغلقة (بما أننا طلبنا limit=2، الفهرس 0 هو المغلقة)
-        open_p = float(current[1])
-        close_p = float(current[4])
-        quote_vol_5m = float(current[7]) # السيولة بالدولار في 5 دقائق
-
+        current = res[0]
+        open_p, close_p, quote_vol_5m = float(current[1]), float(current[4]), float(current[7])
         price_change = ((close_p - open_p) / open_p) * 100
         anomaly_percent = (quote_vol_5m / vol_24h) * 100
 
         if anomaly_percent >= ANOMALY_THRESHOLD:
             icon = "🟢" if price_change >= 0 else "🔴"
             activity = "Unusual buying activity" if price_change >= 0 else "Unusual selling activity"
-            return {"exchange": "Binance", "symbol": symbol, "text": 
-                f"{icon} <b>Binance - USDT Market</b>\n"
-                f"#{symbol} - <b>{activity}</b>\n"
-                f"💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n"
-                f"📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n"
-                f"📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
+            return {"exchange": "Binance", "symbol": symbol, "text": f"{icon} <b>Binance - USDT Market</b>\n#{symbol} - <b>{activity}</b>\n💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
     except Exception: pass
     return None
 
@@ -128,11 +131,8 @@ def scan_all_binance():
     try:
         res = session.get(f"{BINANCE_BASE}/ticker/24hr", timeout=12).json()
         if not isinstance(res, list): return alerts
-        # تصفية العملات ذات السيولة العالية فقط لتجنب البطء
         tickers = {item['symbol']: float(item['quoteVolume']) for item in res if item['symbol'].endswith('USDT') and float(item['quoteVolume']) > 1000000}
     except Exception: return alerts
-
-    print(f"🔍 فحص {len(tickers)} عملة في Binance...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(check_binance_single, sym, vol): sym for sym, vol in tickers.items()}
         for future in as_completed(futures):
@@ -145,25 +145,15 @@ def check_kucoin_single(symbol, vol_24h):
         res = session.get(f"{KUCOIN_BASE}/api/v1/market/candles", params={"type": "5min", "symbol": symbol}, timeout=8).json()
         candles = res.get("data", [])
         if not isinstance(candles, list) or len(candles) < 2: return None
-
         current = candles[0]
-        open_p = float(current[1])
-        close_p = float(current[2])
-        quote_vol_5m = float(current[6]) # turnover in USDT
-
+        open_p, close_p, quote_vol_5m = float(current[1]), float(current[2]), float(current[6])
         price_change = ((close_p - open_p) / open_p) * 100
         anomaly_percent = (quote_vol_5m / vol_24h) * 100
-        clean_name = symbol.replace("-", "")
 
         if anomaly_percent >= ANOMALY_THRESHOLD:
             icon = "🟢" if price_change >= 0 else "🔴"
             activity = "Unusual buying activity" if price_change >= 0 else "Unusual selling activity"
-            return {"exchange": "KuCoin", "symbol": symbol, "text": 
-                f"{icon} <b>KuCoin - USDT Market</b>\n"
-                f"#{clean_name} - <b>{activity}</b>\n"
-                f"💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n"
-                f"📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n"
-                f"📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
+            return {"exchange": "KuCoin", "symbol": symbol, "text": f"{icon} <b>KuCoin - USDT Market</b>\n#{symbol.replace('-','')} - <b>{activity}</b>\n💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
     except Exception: pass
     return None
 
@@ -173,8 +163,6 @@ def scan_all_kucoin():
         res = session.get(f"{KUCOIN_BASE}/api/v1/market/allTickers", timeout=12).json()
         tickers = {item['symbol']: float(item['volValue']) for item in res.get("data", {}).get("ticker", []) if item['symbol'].endswith('-USDT') and float(item['volValue']) > 300000}
     except Exception: return alerts
-
-    print(f"🔍 فحص {len(tickers)} عملة في KuCoin...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(check_kucoin_single, sym, vol): sym for sym, vol in tickers.items()}
         for future in as_completed(futures):
@@ -187,12 +175,8 @@ def check_okx_single(symbol, vol_24h):
         res = session.get(f"{OKX_BASE}/api/v5/market/candles", params={"instId": symbol, "bar": "5m", "limit": 2}, timeout=8).json()
         candles = res.get("data", [])
         if not isinstance(candles, list) or len(candles) < 2: return None
-
         current = candles[0]
-        open_p = float(current[1])
-        close_p = float(current[4])
-        quote_vol_5m = float(current[7]) # volCcyQuote
-
+        open_p, close_p, quote_vol_5m = float(current[1]), float(current[4]), float(current[7])
         price_change = ((close_p - open_p) / open_p) * 100
         anomaly_percent = (quote_vol_5m / vol_24h) * 100
         ccy = symbol.split("-")[0]
@@ -200,12 +184,7 @@ def check_okx_single(symbol, vol_24h):
         if anomaly_percent >= ANOMALY_THRESHOLD:
             icon = "🟢" if price_change >= 0 else "🔴"
             activity = "Unusual buying activity" if price_change >= 0 else "Unusual selling activity"
-            return {"exchange": "OKX", "symbol": symbol, "text": 
-                f"{icon} <b>OKX - USDT Market</b>\n"
-                f"#{ccy} - <b>{activity}</b>\n"
-                f"💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n"
-                f"📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n"
-                f"📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
+            return {"exchange": "OKX", "symbol": symbol, "text": f"{icon} <b>OKX - USDT Market</b>\n#{ccy} - <b>{activity}</b>\n💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
     except Exception: pass
     return None
 
@@ -213,15 +192,8 @@ def scan_all_okx():
     alerts = []
     try:
         res = session.get(f"{OKX_BASE}/api/v5/market/tickers", params={"instType": "SWAP"}, timeout=12).json()
-        tickers = {}
-        for item in res.get("data", []):
-            inst_id = item.get("instId", "")
-            if inst_id.endswith("-USDT-SWAP"):
-                vol = float(item.get("volCcy24h", 0)) * float(item.get("last", 0))
-                if vol > 500000: tickers[inst_id] = vol
+        tickers = {item.get("instId"): float(item.get("volCcy24h", 0)) * float(item.get("last", 0)) for item in res.get("data", []) if item.get("instId").endswith("-USDT-SWAP") and float(item.get("volCcy24h", 0)) * float(item.get("last", 0)) > 500000}
     except Exception: return alerts
-
-    print(f"🔍 فحص {len(tickers)} عملة في OKX...")
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(check_okx_single, sym, vol): sym for sym, vol in tickers.items()}
         for future in as_completed(futures):
@@ -235,24 +207,15 @@ def check_bybit_single(symbol, vol_24h):
         if response.status_code != 200: return None
         data = response.json().get("result", {}).get("list", [])
         if len(data) < 2: return None
-
-        current = data[1] # Bybit يعيد الأحدث أولاً، الفهرس 1 هو المغلقة
-        open_p = float(current[1])
-        close_p = float(current[4])
-        quote_vol_5m = float(current[6]) # turnover
-
+        current = data[1]
+        open_p, close_p, quote_vol_5m = float(current[1]), float(current[4]), float(current[6])
         price_change = ((close_p - open_p) / open_p) * 100
         anomaly_percent = (quote_vol_5m / vol_24h) * 100
 
         if anomaly_percent >= ANOMALY_THRESHOLD:
             icon = "🟢" if price_change >= 0 else "🔴"
             activity = "Unusual buying activity" if price_change >= 0 else "Unusual selling activity"
-            return {"exchange": "Bybit", "symbol": symbol, "text": 
-                f"{icon} <b>Bybit - USDT Market</b>\n"
-                f"#{symbol} - <b>{activity}</b>\n"
-                f"💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n"
-                f"📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n"
-                f"📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
+            return {"exchange": "Bybit", "symbol": symbol, "text": f"{icon} <b>Bybit - USDT Market</b>\n#{symbol} - <b>{activity}</b>\n💵 {quote_vol_5m/1000:,.1f}K USDT in 5 mins (<b>{anomaly_percent:.1f}%</b>)\n📊 P: {format_price(close_p)} (<b>{price_change:+.2f}%</b>)\n📈 24H Vol: {vol_24h/1000000:,.2f}M USDT"}
     except Exception: pass
     return None
 
@@ -261,15 +224,8 @@ def scan_all_bybit():
     try:
         response = session.get(f"{BYBIT_BASE}/v5/market/tickers", params={"category": "linear"}, timeout=12)
         if response.status_code != 200: return alerts
-        tickers = {}
-        for item in response.json().get("result", {}).get("list", []):
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                vol = float(item.get("turnover24h", 0))
-                if vol > 1000000: tickers[sym] = vol
+        tickers = {item.get("symbol"): float(item.get("turnover24h", 0)) for item in response.json().get("result", {}).get("list", []) if item.get("symbol").endswith("USDT") and float(item.get("turnover24h", 0)) > 1000000}
     except Exception: return alerts
-
-    print(f"🔍 فحص {len(tickers)} عملة في Bybit...")
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(check_bybit_single, sym, vol): sym for sym, vol in tickers.items()}
         for future in as_completed(futures):
@@ -278,27 +234,41 @@ def scan_all_bybit():
 
 # ================== Main ==================
 def main():
-    print("🐋 بدء صائد الحيتان الشامل (4 منصات)...")
+    print("🐋 بدء صائد الحيتان الشامل...")
+    cache = load_cache()
+    now = datetime.utcnow()
     
-    all_alerts = (
-        scan_all_okx() + scan_all_kucoin() + scan_all_bybit() + scan_all_binance()
-    )
-
+    all_alerts = scan_all_okx() + scan_all_kucoin() + scan_all_bybit() + scan_all_binance()
+    
+    filtered_alerts = []
     if all_alerts:
-        print(f"🚨 تم رصد {len(all_alerts)} شذوذ في السيولة (Unusual Activity). جاري إرسال الصور...")
         for alert in all_alerts:
+            key = f"{alert['exchange']}_{alert['symbol']}"
+            # التحقق من الذاكرة
+            if key in cache:
+                last_time = datetime.fromisoformat(cache[key])
+                if now - last_time < timedelta(minutes=COOLDOWN_MINUTES):
+                    print(f"⏭️ تم تجاهل {key} (تم التنبيه عنه مؤخراً).")
+                    continue # تخطي هذه العملة
+            
+            filtered_alerts.append(alert)
+            cache[key] = now.isoformat() # تحديث وقت التنبيه
+
+    if filtered_alerts:
+        print(f"🚨 تم رصد {len(filtered_alerts)} شذوذ جديد. جاري إرسال الصور...")
+        for alert in filtered_alerts:
             print(f"📈 توليد شارت لـ {alert['exchange']} | {alert['symbol']}...")
             chart_image = generate_chart_image(alert['exchange'], alert['symbol'])
-            
             for chat_id in CHAT_IDS:
-                if chart_image:
-                    send_telegram_photo(chart_image, alert['text'], chat_id)
-                else:
-                    send_telegram(alert['text'])
+                if chart_image: send_telegram_photo(chart_image, alert['text'], chat_id)
+                else: send_telegram(alert['text'])
+        
+        # حفظ الذاكرة
+        save_cache(cache)
     else:
-        print("ℹ️ السوق هادئ. لا توجد سيولة شاذة (Whale Activity) حالياً.")
+        print("ℹ️ السوق هادئ أو التنبيهات مكررة.")
         if EVENT_NAME == "workflow_dispatch":
-            send_telegram("✅ <b>صائد الحيتان يعمل!</b>\nتم فحص جميع المنصات، السوق هادئ ولا توجد تحركات سيولة شاذة حالياً.")
+            send_telegram("✅ <b>صائد الحيتان يعمل!</b>\nالسوق هادئ ولا توجد تحركات سيولة جديدة حالياً.")
 
 if __name__ == "__main__":
     main()
