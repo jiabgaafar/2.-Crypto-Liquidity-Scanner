@@ -22,7 +22,7 @@ BYBIT_BASE   = "https://api.bybit.com"
 BINANCE_BASE = "https://data-api.binance.vision/api/v3"
 
 # ⚙️ الإعدادات الشرسة (تم فتح الفلاتر)
-ANOMALY_THRESHOLD = 0.8     # حساسية عالية جداً (أي حركة 0.8% من حجم اليوم سيرصدها)
+ANOMALY_THRESHOLD = 2.5     # حساسية عالية جداً (أي حركة 0.8% من حجم اليوم سيرصدها)
 COOLDOWN_MINUTES = 15       # يذكرك بالعملة كل 15 دقيقة
 CACHE_FILE = "alert_cache.json"
 
